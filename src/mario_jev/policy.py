@@ -16,6 +16,7 @@ ACTIONS = {
 
 class JevPolicy:
     def __init__(self, model="jev-latest", env_id=None):
+        self.model = model
         self.client = TypeSafeClient(
             model=model, timeout=15, retry=RetryPolicy(max_retries=0)
         )
@@ -48,6 +49,47 @@ class JevPolicy:
             if env_id == "SuperMarioBros-1-2-v0"
             else None
         )
+        self.stall_recovery_remaining = 0
+        self.stall_recovery_reapproach = False
+
+    def _stuck_recovery_action(self, state):
+        """Back away from a confirmed wall stall before asking Jev again."""
+        obstacle = (
+            state.get("terrain", {}).get("summary", {}).get("nearest_obstacle")
+        )
+        touching_obstacle = bool(
+            obstacle is not None and obstacle.get("distance_px", 1) <= 0
+        )
+        if self.stall_recovery_remaining:
+            self.stall_recovery_remaining -= 1
+            if self.stall_recovery_remaining == 0:
+                self.stall_recovery_reapproach = True
+            return "left", "stuck_recovery_backoff"
+        if self.stall_recovery_reapproach:
+            if touching_obstacle:
+                self.stall_recovery_remaining = 1
+                self.stall_recovery_reapproach = False
+                return "left", "stuck_recovery_extend_backoff"
+            self.stall_recovery_reapproach = False
+            return "right_run_jump", "stuck_recovery_reapproach"
+        if state.get("blocked_forward") and touching_obstacle:
+            self.stall_recovery_remaining = 1
+            return "left", "stuck_recovery_backoff"
+        return None, None
+
+    def _recovery_diagnostics(self, reason):
+        return {
+            "confidence": 0.0,
+            "probabilities": {},
+            "decisions": {
+                "movement": "stuck_recovery",
+                "recovery": reason,
+                "jump_pressed": False,
+            },
+            "model": self.model,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "recovery_override": reason,
+        }
 
     def _world12_opening_override(self, state, action):
         """Handle the known two-Goomba opening without changing other levels.
@@ -129,6 +171,9 @@ class JevPolicy:
         return action, None
 
     def choose(self, state):
+        recovery_action, recovery_reason = self._stuck_recovery_action(state)
+        if recovery_action:
+            return recovery_action, self._recovery_diagnostics(recovery_reason)
         response = self.client.system_one(state=state, questions=self.questions)
         movement = response.answers["movement"]
         start = response.answers["start_jump"].noul

@@ -129,3 +129,26 @@ def test_world12_koopa_profile_rejects_braking_into_threat(monkeypatch):
         assert reason == "world12_koopa_short_hop"
     finally:
         policy.close()
+
+
+def test_stuck_recovery_backs_away_before_reapproaching(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    policy = JevPolicy()
+    try:
+        state = {
+            "blocked_forward": True,
+            "mario": {"x": 850, "grounded": True},
+            "terrain": {"summary": {"nearest_obstacle": {"distance_px": 0}}},
+        }
+        action, reason = policy._stuck_recovery_action(state)
+        assert (action, reason) == ("left", "stuck_recovery_backoff")
+
+        state["blocked_forward"] = False
+        action, reason = policy._stuck_recovery_action(state)
+        assert (action, reason) == ("left", "stuck_recovery_backoff")
+
+        state["terrain"]["summary"]["nearest_obstacle"]["distance_px"] = 16
+        action, reason = policy._stuck_recovery_action(state)
+        assert (action, reason) == ("right_run_jump", "stuck_recovery_reapproach")
+    finally:
+        policy.close()
